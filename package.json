@@ -1,0 +1,25 @@
+{
+  "name": "paseo-synthetic-usage-source",
+  "version": "1.0.0",
+  "description": "Paseo usage source for Synthetic plan quotas",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "format": "oxfmt .",
+    "lint": "oxlint index.server.ts server shared"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "^0.12.0",
+    "@types/node": "^22.19.0",
+    "oxfmt": "0.74.0",
+    "oxlint": "1.61.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.7",
+    "zod": "^4.4.3"
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}

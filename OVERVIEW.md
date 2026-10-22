@@ -1,0 +1,3 @@
+Shows Synthetic subscription quota windows in Paseo Usage, including rolling five-hour requests, weekly credits, search, and free tool-call quotas when Synthetic returns them. Synthetic describes its quota API as under development, and an account without quota data can return an empty response.
+
+The plugin reads a Synthetic API key from the Paseo daemon's `PASEO_SYNTHETIC_API_KEY` or `SYNTHETIC_API_KEY` environment variable, or discovers the Synthetic credential stored by OpenCode. It sends the key as a Bearer token to Synthetic's `https://api.synthetic.new/v2/quotas` endpoint. It reads OpenCode's local credential store without modifying it. Synthetic's quota endpoint can return no quota data for an account; Paseo reports that as unavailable.
