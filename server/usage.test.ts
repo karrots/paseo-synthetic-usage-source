@@ -77,10 +77,66 @@ describe("Synthetic usage source", () => {
     );
     expect(report).toMatchObject({
       status: "available",
-      windows: [{ id: "five_hour", label: "5 hours", usedPct: 5 }],
+      windows: [{ id: "subscription", label: "Subscription", usedPct: 5 }],
       details: [{ id: "requests", value: "5 / 100" }],
     });
   });
+
+  test("reports only weekly credits for the website quota response", async () => {
+    process.env.SYNTHETIC_API_KEY = "synthetic-key";
+    const [account] = await discover({ kind: "global" });
+    const report = await fetchUsage(account?.input, async () =>
+      Response.json({
+        subscription: { limit: 500, requests: 0, renewsAt: "2026-11-02T09:17:08.241Z" },
+        search: { hourly: { limit: 250, requests: 0, renewsAt: "2026-11-02T05:17:08.242Z" } },
+        planWeeklyLimit: {
+          nextRegenAt: "2026-11-02T05:17:44.000Z",
+          percentRemaining: 27.882715276190478,
+          nextRegenPercent: 2,
+        },
+      }),
+    );
+    expect(report).toMatchObject({
+      status: "available",
+      windows: [
+        {
+          id: "weekly",
+          usedPct: expect.closeTo(72.1172847238, 5),
+          remainingPct: expect.closeTo(27.8827152762, 5),
+          resetsAt: "2026-11-07T06:29:44.000Z",
+          summary: true,
+        },
+      ],
+    });
+  });
+
+  test.each([
+    [99, 2, "2026-11-02T05:17:44.000Z"],
+    [96, 2, "2026-11-02T08:39:44.000Z"],
+    [0, 2, "2026-11-09T02:15:44.000Z"],
+    [100, 2, null],
+    [50, 0, null],
+    [50, undefined, null],
+  ])(
+    "estimates full regeneration at %s percent remaining with %s percent ticks",
+    async (percentRemaining, nextRegenPercent, resetsAt) => {
+      process.env.SYNTHETIC_API_KEY = "synthetic-key";
+      const [account] = await discover({ kind: "global" });
+      const report = await fetchUsage(account?.input, async () =>
+        Response.json({
+          planWeeklyLimit: {
+            percentRemaining,
+            nextRegenPercent,
+            nextRegenAt: "2026-11-02T05:17:44.000Z",
+          },
+        }),
+      );
+      expect(report).toMatchObject({
+        status: "available",
+        windows: [{ id: "weekly", resetsAt }],
+      });
+    },
+  );
 
   test("reads Synthetic's current quota fields without requiring legacy subscription data", async () => {
     process.env.SYNTHETIC_API_KEY = "synthetic-key";
@@ -120,16 +176,40 @@ describe("Synthetic usage source", () => {
 
     expect(report).toMatchObject({
       status: "available",
-      windows: [
-        { id: "five_hour", usedPct: expect.closeTo(4.15625, 5), resetsAt: "2026-10-21T20:15:00Z" },
-        { id: "weekly", usedPct: 12.5, resetsAt: "2026-10-21T22:00:00Z" },
-        { id: "search_hourly", usedPct: 10, resetsAt: "2026-10-21T21:00:00Z" },
-        { id: "free_tool_calls", usedPct: 5, resetsAt: "2026-10-22T00:00:00Z" },
-      ],
-      details: [
-        { id: "requests", value: "26.6 / 640" },
-        { id: "weekly_credits", value: "$115.50 remaining of $132.00" },
-      ],
+      windows: [{ id: "weekly", usedPct: 12.5, resetsAt: null, summary: true }],
+      details: [{ id: "weekly_credits", value: "$115.50 remaining of $132.00" }],
+    });
+  });
+
+  test("prefers plan weekly credits over legacy weekly credits", async () => {
+    process.env.SYNTHETIC_API_KEY = "synthetic-key";
+    const [account] = await discover({ kind: "global" });
+    const report = await fetchUsage(account?.input, async () =>
+      Response.json({
+        planWeeklyLimit: { percentRemaining: 25 },
+        weeklyTokenLimit: { percentRemaining: 90, remainingCredits: "$90" },
+      }),
+    );
+    expect(report).toMatchObject({
+      status: "available",
+      windows: [{ id: "weekly", usedPct: 75, summary: true, resetsAt: null }],
+    });
+    expect(report).not.toHaveProperty("details");
+  });
+
+  test("falls back to one rolling bar when weekly credits are absent", async () => {
+    process.env.SYNTHETIC_API_KEY = "synthetic-key";
+    const [account] = await discover({ kind: "global" });
+    const report = await fetchUsage(account?.input, async () =>
+      Response.json({
+        rollingFiveHourLimit: { remaining: 75, max: 100, nextTickAt: "2026-11-02T05:17:44Z" },
+        subscription: { requests: 0, limit: 500, renewsAt: "2026-11-02T09:17:08Z" },
+      }),
+    );
+    expect(report).toMatchObject({
+      status: "available",
+      windows: [{ id: "five_hour", usedPct: 25, summary: true }],
+      details: [{ id: "requests", value: "25 / 100" }],
     });
   });
 
@@ -193,15 +273,7 @@ describe("Synthetic usage source", () => {
     );
     expect(report).toMatchObject({
       status: "available",
-      windows: [
-        {
-          id: "five_hour",
-          usedPct: expect.closeTo(3.9733, 4),
-          resetsAt: "2026-10-07T20:00:00Z",
-        },
-        { id: "weekly", usedPct: 60, resetsAt: "2026-10-08T00:00:00Z" },
-      ],
-      details: [{ value: "29.8 / 750" }],
+      windows: [{ id: "weekly", usedPct: 60, resetsAt: null, summary: true }],
     });
   });
 

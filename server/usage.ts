@@ -15,6 +15,13 @@ import {
 import { inputSchema, type Input } from "../shared/input.js";
 
 const quotasSchema = z.object({
+  planWeeklyLimit: z
+    .object({
+      percentRemaining: z.number().finite().min(0).max(100),
+      nextRegenAt: z.iso.datetime({ offset: true }).nullish(),
+      nextRegenPercent: z.number().finite().min(0).max(100).nullish(),
+    })
+    .nullish(),
   rollingFiveHourLimit: z
     .object({
       nextTickAt: z.iso.datetime({ offset: true }),
@@ -32,24 +39,6 @@ const quotasSchema = z.object({
     })
     .nullish(),
   subscription: z
-    .object({
-      limit: z.number().finite().nonnegative(),
-      requests: z.number().finite().nonnegative(),
-      renewsAt: z.iso.datetime({ offset: true }),
-    })
-    .nullish(),
-  search: z
-    .object({
-      hourly: z
-        .object({
-          limit: z.number().finite().nonnegative(),
-          requests: z.number().finite().nonnegative(),
-          renewsAt: z.iso.datetime({ offset: true }),
-        })
-        .nullish(),
-    })
-    .nullish(),
-  freeToolCalls: z
     .object({
       limit: z.number().finite().nonnegative(),
       requests: z.number().finite().nonnegative(),
@@ -243,13 +232,53 @@ async function fetchQuotas(
   }
 }
 
+// Synthetic restores weekly credits in discrete ticks every 202 minutes.
+// https://synthetic.new/rate-limits
+const weeklyRegenerationIntervalMs = 202 * 60 * 1_000;
+
+function fullRegenerationAt(
+  weekly: z.infer<typeof quotasSchema>["planWeeklyLimit"],
+): string | null {
+  if (!weekly?.nextRegenAt || !weekly.nextRegenPercent || weekly.percentRemaining >= 100)
+    return null;
+
+  const ticksNeeded = Math.ceil((100 - weekly.percentRemaining) / weekly.nextRegenPercent);
+  const fullAt = Date.parse(weekly.nextRegenAt) + (ticksNeeded - 1) * weeklyRegenerationIntervalMs;
+  return Number.isFinite(fullAt) && fullAt <= 8.64e15 ? new Date(fullAt).toISOString() : null;
+}
+
 function reportFromQuotas(quotas: z.infer<typeof quotasSchema>): UsageReport {
   const rolling = quotas.rollingFiveHourLimit;
   const subscription = quotas.subscription;
   const windows = [];
   const details = [];
 
-  if (rolling) {
+  const weekly = quotas.planWeeklyLimit ?? quotas.weeklyTokenLimit;
+  if (weekly) {
+    const weeklyUsedPct = 100 - weekly.percentRemaining;
+    windows.push(
+      windowFromUsedPct({
+        id: "weekly",
+        label: "Weekly",
+        shortLabel: "wk",
+        utilizationPct: weeklyUsedPct,
+        resetsAt: fullRegenerationAt(quotas.planWeeklyLimit),
+        tone: toneFromUsedPct(weeklyUsedPct),
+        summary: true,
+      }),
+    );
+    if (
+      !quotas.planWeeklyLimit &&
+      quotas.weeklyTokenLimit &&
+      (quotas.weeklyTokenLimit.remainingCredits || quotas.weeklyTokenLimit.maxCredits)
+    ) {
+      details.push({
+        id: "weekly_credits",
+        label: "Weekly credits",
+        value: `${quotas.weeklyTokenLimit.remainingCredits ?? "?"} remaining of ${quotas.weeklyTokenLimit.maxCredits ?? "?"}`,
+      });
+    }
+  } else if (rolling) {
     const requests = Math.max(0, rolling.max - rolling.remaining);
     const usedPct = usedPctOf(requests, rolling.max);
     windows.push(
@@ -269,13 +298,12 @@ function reportFromQuotas(quotas: z.infer<typeof quotasSchema>): UsageReport {
       value: `${Math.round(requests * 100) / 100} / ${rolling.max}`,
     });
   } else if (subscription) {
-    // Older API responses expose the five-hour quota only through subscription.
     const usedPct = usedPctOf(subscription.requests, subscription.limit);
     windows.push(
       windowFromUsedPct({
-        id: "five_hour",
-        label: "5 hours",
-        shortLabel: "5h",
+        id: "subscription",
+        label: "Subscription",
+        shortLabel: "Plan",
         utilizationPct: usedPct,
         resetsAt: subscription.renewsAt,
         tone: toneFromUsedPct(usedPct),
@@ -288,57 +316,6 @@ function reportFromQuotas(quotas: z.infer<typeof quotasSchema>): UsageReport {
       value: `${subscription.requests} / ${subscription.limit}`,
     });
   }
-
-  if (quotas.weeklyTokenLimit) {
-    const weeklyUsedPct = 100 - quotas.weeklyTokenLimit.percentRemaining;
-    windows.push(
-      windowFromUsedPct({
-        id: "weekly",
-        label: "Weekly",
-        shortLabel: "wk",
-        utilizationPct: weeklyUsedPct,
-        resetsAt: quotas.weeklyTokenLimit.nextRegenAt ?? null,
-        tone: toneFromUsedPct(weeklyUsedPct),
-      }),
-    );
-    if (quotas.weeklyTokenLimit.remainingCredits || quotas.weeklyTokenLimit.maxCredits) {
-      details.push({
-        id: "weekly_credits",
-        label: "Weekly credits",
-        value: `${quotas.weeklyTokenLimit.remainingCredits ?? "?"} remaining of ${quotas.weeklyTokenLimit.maxCredits ?? "?"}`,
-      });
-    }
-  }
-
-  const search = quotas.search?.hourly;
-  if (search) {
-    const usedPct = usedPctOf(search.requests, search.limit);
-    windows.push(
-      windowFromUsedPct({
-        id: "search_hourly",
-        label: "Search · hourly",
-        shortLabel: "Search",
-        utilizationPct: usedPct,
-        resetsAt: search.renewsAt,
-        tone: toneFromUsedPct(usedPct),
-      }),
-    );
-  }
-
-  if (quotas.freeToolCalls) {
-    const usedPct = usedPctOf(quotas.freeToolCalls.requests, quotas.freeToolCalls.limit);
-    windows.push(
-      windowFromUsedPct({
-        id: "free_tool_calls",
-        label: "Free tool calls",
-        shortLabel: "Tools",
-        utilizationPct: usedPct,
-        resetsAt: quotas.freeToolCalls.renewsAt,
-        tone: toneFromUsedPct(usedPct),
-      }),
-    );
-  }
-
   if (windows.length === 0)
     return unavailable({
       kind: "no_quota",
